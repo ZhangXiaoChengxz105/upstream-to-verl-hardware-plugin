@@ -257,7 +257,10 @@ learned critics, multimodal inputs, colocated rollout, and multi-node jobs are
 outside the supported configuration.
 
 The `neuron_nixl` sender assembles BF16 buckets from live TorchTitan shards on
-Trainium. `update_weights_bucket_megabytes` controls the bucket size. Remove
+Trainium. NIXL transfers each TP rank's slices into a rollout HBM buffer.
+The receiver applies them directly to the model's resident weights, including
+the FP32 GDN parameters in the hybrid decoder. `update_weights_bucket_megabytes`
+controls the bucket size. Remove
 `weight_sync_cpu_gather_threshold_bytes` from existing job overrides.
 
 We use CPU sampling because vLLM-Neuron's current on-device sampler limits
@@ -296,3 +299,21 @@ RUN_DIR="$NEURON_EXAMPLE_DIR/runs/longer-$(date +%Y%m%d-%H%M%S)" \
   data.train_max_samples=-1 data.val_max_samples=32 \
   trainer.total_training_steps=20 trainer.test_freq=5
 ```
+
+### Qwen3.8-27B text rollout
+
+The 27B checkpoint uses the Hugging Face architecture IDs `qwen3_5` and
+`qwen3_5_text`. Its hybrid decoder needs more than the dense Qwen3
+dependencies in the example above: the trainer must provide
+`torchtitan_neuron.models.qwen3_8.from_hf_config`, and vLLM-Neuron must
+support the BF16 text model on Model Runner V2, including
+`sampling_vocab_size` and `suppressed_token_ids` overrides. The stock
+Neuron 2.33.1 packages alone do not provide that combination.
+
+For the 512-token GSM8K setup, use actor TP4 × FSDP8 and four TP8
+rollout replicas on one Trn2 host. Use padded inputs, disable prefix
+caching and chunked prefill, and set `actor_rollout_ref.rollout.top_k=256` for
+the V2 on-device sampler. Set `actor_rollout_ref.rollout.calculate_log_probs=false`
+and `actor_rollout_ref.rollout.engine_kwargs.vllm.logprobs_mode=raw_logprobs`
+so the actor computes the GRPO log probabilities. The NIXL sender assembles GDN projection and
+convolution slices from live actor shards in bounded Trainium buffers.
